@@ -18,14 +18,15 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-
+import sys
+import requests
 import os
 import calendar
 import icalendar
 import json
 from datetime import date, time, datetime, timedelta
 from operator import itemgetter
-from cgi import escape
+from html import escape
 import hashlib
 from time import sleep
 from dateutil import rrule
@@ -35,9 +36,6 @@ from extendedhtmlcalendar import ExtendedHTMLCalendar
 
 #############################################
 # user settings:
-
-config = json.load(open("config.json"))
-verbose = config['verbose']
 
 with open('template.html', 'r', encoding='utf-8') as myfile:
 	htmltemplate = myfile.read().split("{{calendar}}")
@@ -210,130 +208,61 @@ def _makeitemtooltip(item):
 	return ''
 
 def render_caldata_html(data):
-	with open(config["html_output_file"], "wb") as outfp:
-		renderdate = str(datetime.now())
-		outfp.write(htmltemplate[0].replace("{{renderdate}}", renderdate).encode("utf-8"))
+	outfp = sys.stdout
+	renderdate = str(datetime.now())
+	outfp.write(htmltemplate[0].replace("{{renderdate}}", renderdate))
 
-		for y, months in sorted(data.items()):
-			for m, days in sorted(months.items()):
+	for y, months in sorted(data.items()):
+		for m, days in sorted(months.items()):
 
-				def callback(day):
-					ret = ''
-					if (y, m, day) == today.timetuple()[:3]:
-						ret += "<a name='today' id='today'></a>"
-					if day not in days:
-						return ret
-
-
-					for item in days[day][0]:
-						ttl = _makeitemtooltip(item)
-						# add markers to differentiate multi-day items
-						if item['hasprev'] and item['haspost']:
-							longsym = "&#8596;"
-						elif item['hasprev']:
-							longsym = "&#8677;"
-						elif item['haspost']:
-							longsym = "&#8676;"
-						else:
-							longsym = ""
-
-						ret += "<div class='calitem allday %s'%s>%s%s</div>" % (item['calsrcclass'], ttl, longsym, item['summary'])
-					ret += "<div class='alldayseparator'></div>"
-
-					for item in sorted(days[day][1], key=itemgetter("tstart")):
-						ttl = _makeitemtooltip(item)
-						item_tend   = item['tend'].strftime("%H:%M")
-						item_tstart = item['tstart'].strftime("%H:%M")
-						# add markers to differentiate multi-day items
-						if item['hasprev'] and item['haspost']:
-							timestr = "..."
-						elif item['hasprev']:
-							timestr = "...&mdash;%s" % (item_tend)
-						elif item['haspost']:
-							timestr = "%s&mdash;..." % (item_tstart)
-						else:
-							timestr = "%s&mdash;%s" % (item_tstart, item_tend)
-						ret += "<div class='calitem timed %s'%s><div class='caltime'>%s</div>%s</div>" % (item['calsrcclass'], ttl, timestr, item['summary'])
+			def callback(day):
+				ret = ''
+				if (y, m, day) == today.timetuple()[:3]:
+					ret += "<a name='today' id='today'></a>"
+				if day not in days:
 					return ret
 
-				outfp.write(ExtendedHTMLCalendar().formatmonth(callback, y, m).encode("utf-8"))
 
-		outfp.write(htmltemplate[1].replace("{{renderdate}}", renderdate).encode("utf-8"))
+				for item in days[day][0]:
+					ttl = _makeitemtooltip(item)
+					# add markers to differentiate multi-day items
+					if item['hasprev'] and item['haspost']:
+						longsym = "&#8596;"
+					elif item['hasprev']:
+						longsym = "&#8677;"
+					elif item['haspost']:
+						longsym = "&#8676;"
+					else:
+						longsym = ""
+
+					ret += "<div class='calitem allday %s'%s>%s%s</div>" % (item['calsrcclass'], ttl, longsym, item['summary'])
+				ret += "<div class='alldayseparator'></div>"
+
+				for item in sorted(days[day][1], key=itemgetter("tstart")):
+					ttl = _makeitemtooltip(item)
+					item_tend   = item['tend'].strftime("%H:%M")
+					item_tstart = item['tstart'].strftime("%H:%M")
+					# add markers to differentiate multi-day items
+					if item['hasprev'] and item['haspost']:
+						timestr = "..."
+					elif item['hasprev']:
+						timestr = "...&mdash;%s" % (item_tend)
+					elif item['haspost']:
+						timestr = "%s&mdash;..." % (item_tstart)
+					else:
+						timestr = "%s&mdash;%s" % (item_tstart, item_tend)
+					ret += "<div class='calitem timed %s'%s><div class='caltime'>%s</div>%s</div>" % (item['calsrcclass'], ttl, timestr, item['summary'])
+				return ret
+
+			outfp.write(ExtendedHTMLCalendar().formatmonth(callback, y, m))
+
+	outfp.write(htmltemplate[1].replace("{{renderdate}}", renderdate))
 
 
 
 ################################################################################################
 if __name__=='__main__':
-	ical_input_files = {k:os.path.expanduser(fpath) for k,fpath in config['ical_input_files'].items()}
-
-	today = datetime.today().date() - addoneday  # this is simply to force refreshing the data on first invocation
-
-
-	while True:
-
-		anymodified = False
-		daychanged = False
-
-		oldtoday = today
-
-		today = datetime.today().date()
-
-		if today != oldtoday:
-			# we definitely want to force a full re-parse since we may need to load data not in prev pass, even if the source files are the same
-			anymodified = True
-			daychanged = True
-			if verbose:
-				print("It's a new day, it's a new dawn, it's a new life for me")
-			percalmd5 = {k:'' for k in ical_input_files}
-			percalmodwhen = {k:0 for k in ical_input_files}
-			percaldata = {k:{} for k in ical_input_files}
-
-			# decide the lowest and highest date we'll care about
-			startdate = today - timedelta(days = config['view_days_before'])
-			enddate   = today + timedelta(days = config['view_days_after'])
-
-
-		# Loop over the cal source files, deciding whether they need a full re-parse or not
-		for calsrcclass, fpath in ical_input_files.items():
-
-			mtime = os.path.getmtime(fpath)
-			if not daychanged:
-				if mtime == percalmodwhen[calsrcclass]:
-					percalmodwhen[calsrcclass] = mtime
-					continue  # no need to reload or reparse the data
-				if verbose:
-					print("mtime mismatch: %s %s" % (mtime, percalmodwhen[calsrcclass]))
-			percalmodwhen[calsrcclass] = mtime
-
-			with open(fpath) as infp:
-				if verbose:
-					print("  loading %s" % calsrcclass)
-				icalstr = infp.read()
-
-			onemd5 = hashlib.md5()
-			onemd5.update(icalstr.encode('utf-8'))
-			onemd5 = onemd5.digest()
-			if not daychanged:
-				if onemd5 == percalmd5[calsrcclass]:
-					percalmd5[calsrcclass] = onemd5
-					continue # no need to reparse
-				if verbose:
-					print("md5 mismatch: %s %s" % (onemd5, percalmd5[calsrcclass]))
-			percalmd5[calsrcclass] = onemd5
-
-			anymodified = True
-			del percaldata[calsrcclass]
-			if verbose:
-				print("  parsing %s" % calsrcclass)
-			percaldata[calsrcclass] = parse_ical_str(icalstr, calsrcclass) # PARSE
-			del icalstr
-
-		if anymodified:
-			data = mergecaldatas(percaldata.values())
-			if verbose:
-				print("  rendering html")
-			render_caldata_html(data)
-			del data
-
-		sleep(config['sleepdur'])
-
+    today = datetime.today().date() - addoneday  # this is simply to force refreshing the data on first invocation
+    startdate = today - timedelta(0)
+    enddate   = today + timedelta(7)
+    render_caldata_html(parse_ical_str(requests.get('https://www.williamjbowman.com/freebusy.ics').text))
